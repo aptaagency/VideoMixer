@@ -5,6 +5,7 @@ const path = require("path");
 const { exec } = require("child_process");
 const archiver = require("archiver");
 const { v4: uuidv4 } = require("uuid");
+const pLimit = require("p-limit");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -34,6 +35,7 @@ function runCommand(cmd) {
 }
 
 async function combineVideos(hookPath, bodyPath, outputPath) {
+  console.log(`🎬 Combining: ${hookPath} + ${bodyPath}`);
   const ffmpegCmd = `ffmpeg -hide_banner -loglevel error -stats -fflags +genpts \
 -i "${hookPath}" -i "${bodyPath}" \
 -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
@@ -61,25 +63,25 @@ function saveStatus(taskId, data) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
   fs.ensureDirSync(path.dirname(statusPath));
   fs.writeJsonSync(statusPath, data);
-  console.log(`✅ Status salvo em ${statusPath}:`, data);
+  console.log(`✅ Status saved at ${statusPath}:`, data);
 }
 
 function getStatus(taskId) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
-  console.log("📥 Verificando status para:", taskId);
-  console.log("📄 Caminho:", statusPath);
+  console.log("📥 Checking status for:", taskId);
+  console.log("📄 Path:", statusPath);
 
   if (!fs.existsSync(statusPath)) {
-    console.log("❌ status.json NÃO encontrado!");
+    console.log("❌ status.json NOT found!");
     return null;
   }
 
   try {
     const data = fs.readJsonSync(statusPath);
-    console.log("✅ Status encontrado:", data);
+    console.log("✅ Status found:", data);
     return data;
   } catch (err) {
-    console.log("❌ Erro ao ler status.json:", err.message);
+    console.log("❌ Error reading status.json:", err.message);
     return null;
   }
 }
@@ -97,16 +99,16 @@ app.post(
     if (hooks.length === 0 || bodies.length === 0) {
       return res
         .status(400)
-        .json({ error: "Envie pelo menos 1 hook e 1 body" });
+        .json({ error: "Please upload at least one hook and one body video." });
     }
 
     const taskId = uuidv4();
-    console.log("🆕 Nova task:", taskId);
+    console.log("🆕 New task:", taskId);
 
     saveStatus(taskId, { status: "processing" });
     processVideos(taskId, hooks, bodies);
 
-    res.status(202).json({ message: "Upload recebido", taskId });
+    res.status(202).json({ message: "Upload received", taskId });
   }
 );
 
@@ -115,7 +117,7 @@ app.get("/status/:taskId", (req, res) => {
   const taskStatus = getStatus(taskId);
 
   if (!taskStatus) {
-    return res.status(404).json({ error: "taskId não encontrado" });
+    return res.status(404).json({ error: "taskId not found" });
   }
 
   res.json(taskStatus);
@@ -128,6 +130,7 @@ async function processVideos(taskId, hooks, bodies) {
   await fs.ensureDir(taskDir);
 
   let successCount = 0;
+  const limit = pLimit(1); // Limit to 1 concurrent task
   const jobs = [];
 
   for (const hook of hooks) {
@@ -136,9 +139,21 @@ async function processVideos(taskId, hooks, bodies) {
         path.parse(body.originalname).name
       }.mp4`;
       const outputPath = path.join(taskDir, name);
-      const job = combineVideos(hook.path, body.path, outputPath)
-        .then(() => successCount++)
-        .catch((err) => console.error("❌ Erro ao combinar vídeos:", err));
+
+      const job = limit(async () => {
+        try {
+          console.log(
+            `🎬 Starting: ${hook.originalname} + ${body.originalname}`
+          );
+          await combineVideos(hook.path, body.path, outputPath);
+          console.log(`✅ Finished: ${name}`);
+          successCount++;
+        } catch (err) {
+          console.error("❌ Error combining videos:", err);
+          saveStatus(taskId, { status: "error", message: err.toString() });
+        }
+      });
+
       jobs.push(job);
     }
   }
@@ -147,24 +162,24 @@ async function processVideos(taskId, hooks, bodies) {
     await Promise.all(jobs);
 
     const report = `Task: ${taskId}
-Data: ${new Date().toLocaleString()}
+Date: ${new Date().toLocaleString()}
 Combinations: ${hooks.length * bodies.length}
-Sucessos: ${successCount}
-Falhas: ${hooks.length * bodies.length - successCount}`;
+Successes: ${successCount}
+Failures: ${hooks.length * bodies.length - successCount}`;
     fs.writeFileSync(path.join(taskDir, "report.txt"), report);
 
     const zipPath = path.join(resultsDir, `${taskId}.zip`);
     await zipDirectory(taskDir, zipPath);
 
-    saveStatus(taskId, {
+    await saveStatus(taskId, {
       status: "done",
       downloadUrl: `/results/${taskId}.zip`,
       success: successCount,
       total: hooks.length * bodies.length,
     });
   } catch (err) {
-    console.log("❌ ERRO NO PROCESSAMENTO:", err.message);
-    saveStatus(taskId, { status: "error", message: err.message });
+    console.log("❌ PROCESSING ERROR:", err.message);
+    await saveStatus(taskId, { status: "error", message: err.message });
   } finally {
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
   }
@@ -172,7 +187,7 @@ Falhas: ${hooks.length * bodies.length - successCount}`;
 
 const http = require("http");
 const server = http.createServer(app);
-server.setTimeout(10 * 60 * 1000);
+server.setTimeout(10 * 60 * 1000); // 10 minutes timeout
 server.listen(port, "0.0.0.0", () => {
   console.log(`🚀 Server running on http://0.0.0.0:${port}`);
 });

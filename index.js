@@ -5,7 +5,6 @@ const path = require("path");
 const { exec } = require("child_process");
 const archiver = require("archiver");
 const { v4: uuidv4 } = require("uuid");
-const pLimit = require("p-limit");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -27,16 +26,27 @@ const upload = multer({ storage });
 
 function runCommand(cmd) {
   return new Promise((resolve, reject) => {
-    exec(cmd, (error, stdout, stderr) => {
-      if (error) return reject(stderr || stdout);
-      resolve(stdout);
+    const child = exec(
+      cmd,
+      { timeout: 5 * 60 * 1000 },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error("⚠️ FFmpeg error:", stderr || stdout || error.message);
+          return reject(stderr || stdout || error.message);
+        }
+        resolve(stdout);
+      }
+    );
+
+    child.on("error", (err) => {
+      console.error("❌ Exec error:", err);
+      reject(err);
     });
   });
 }
 
 async function combineVideos(hookPath, bodyPath, outputPath) {
-  console.log(`🎬 Combining: ${hookPath} + ${bodyPath}`);
-  const ffmpegCmd = `ffmpeg -hide_banner -loglevel error -stats -fflags +genpts \
+  const ffmpegCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats -fflags +genpts \
 -i "${hookPath}" -i "${bodyPath}" \
 -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
 pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v0];\
@@ -46,6 +56,10 @@ pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v1];\
 [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[a1];\
 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \
 -map "[outv]" -map "[outa]" -c:v libx264 -preset fast -c:a aac -b:a 128k -y "${outputPath}"`;
+
+  console.log("🎬 Executing FFmpeg command:");
+  console.log(ffmpegCmd);
+
   return runCommand(ffmpegCmd);
 }
 
@@ -68,20 +82,12 @@ function saveStatus(taskId, data) {
 
 function getStatus(taskId) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
-  console.log("📥 Checking status for:", taskId);
-  console.log("📄 Path:", statusPath);
-
-  if (!fs.existsSync(statusPath)) {
-    console.log("❌ status.json NOT found!");
-    return null;
-  }
+  if (!fs.existsSync(statusPath)) return null;
 
   try {
-    const data = fs.readJsonSync(statusPath);
-    console.log("✅ Status found:", data);
-    return data;
+    return fs.readJsonSync(statusPath);
   } catch (err) {
-    console.log("❌ Error reading status.json:", err.message);
+    console.log("❌ Failed to read status.json:", err.message);
     return null;
   }
 }
@@ -92,22 +98,23 @@ app.post(
     { name: "hooks", maxCount: 10 },
     { name: "bodies", maxCount: 10 },
   ]),
-  async (req, res) => {
+  (req, res) => {
     const hooks = req.files?.hooks || [];
     const bodies = req.files?.bodies || [];
 
     if (hooks.length === 0 || bodies.length === 0) {
       return res
         .status(400)
-        .json({ error: "Please upload at least one hook and one body video." });
+        .json({ error: "Send at least 1 hook and 1 body video." });
     }
 
     const taskId = uuidv4();
     console.log("🆕 New task:", taskId);
-
     saveStatus(taskId, { status: "processing" });
+
+    // Chama o processamento e captura qualquer erro inesperado
     processVideos(taskId, hooks, bodies).catch((err) => {
-      console.error(`[${taskId}] Unhandled error in processVideos:`, err);
+      console.error(`[${taskId}] Unhandled error:`, err);
       saveStatus(taskId, { status: "error", message: err.message });
     });
 
@@ -116,13 +123,8 @@ app.post(
 );
 
 app.get("/status/:taskId", (req, res) => {
-  const { taskId } = req.params;
-  const taskStatus = getStatus(taskId);
-
-  if (!taskStatus) {
-    return res.status(404).json({ error: "taskId not found" });
-  }
-
+  const taskStatus = getStatus(req.params.taskId);
+  if (!taskStatus) return res.status(404).json({ error: "Task not found" });
   res.json(taskStatus);
 });
 
@@ -146,30 +148,25 @@ async function processVideos(taskId, hooks, bodies) {
         console.log(`[${taskId}] Processing combination: ${name}`);
         try {
           await combineVideos(hook.path, body.path, outputPath);
+          console.log(`[${taskId}] ✅ Finished: ${name}`);
           successCount++;
-          console.log(`[${taskId}] Finished combination: ${name}`);
         } catch (err) {
-          console.error(`[${taskId}] Error combining videos ${name}:`, err);
+          console.error(`[${taskId}] ❌ Error combining ${name}:`, err);
         }
       }
     }
 
-    console.log(
-      `[${taskId}] All combinations processed. Creating report and zip...`
-    );
-
     const report = `Task: ${taskId}
-Data: ${new Date().toLocaleString()}
+Date: ${new Date().toLocaleString()}
 Combinations: ${hooks.length * bodies.length}
 Successes: ${successCount}
 Failures: ${hooks.length * bodies.length - successCount}`;
-
     fs.writeFileSync(path.join(taskDir, "report.txt"), report);
-    console.log(`[${taskId}] Report created.`);
+    console.log(`[${taskId}] 📝 Report created.`);
 
     const zipPath = path.join(resultsDir, `${taskId}.zip`);
     await zipDirectory(taskDir, zipPath);
-    console.log(`[${taskId}] Zip file created at ${zipPath}`);
+    console.log(`[${taskId}] 📦 Zip file created.`);
 
     saveStatus(taskId, {
       status: "done",
@@ -177,19 +174,19 @@ Failures: ${hooks.length * bodies.length - successCount}`;
       success: successCount,
       total: hooks.length * bodies.length,
     });
-    console.log(`[${taskId}] Status updated to done.`);
+    console.log(`[${taskId}] ✅ Status updated to done.`);
   } catch (err) {
-    console.error(`[${taskId}] Processing error:`, err);
+    console.error(`[${taskId}] ❌ Fatal error:`, err);
     saveStatus(taskId, { status: "error", message: err.message });
   } finally {
-    console.log(`[${taskId}] Cleaning up uploaded files...`);
+    console.log(`[${taskId}] 🧹 Cleaning up temp files.`);
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
   }
 }
 
 const http = require("http");
 const server = http.createServer(app);
-server.setTimeout(10 * 60 * 1000); // 10 minutes timeout
+server.setTimeout(10 * 60 * 1000); // 10 minutos
 server.listen(port, "0.0.0.0", () => {
   console.log(`🚀 Server running on http://0.0.0.0:${port}`);
 });

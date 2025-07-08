@@ -106,7 +106,10 @@ app.post(
     console.log("🆕 New task:", taskId);
 
     saveStatus(taskId, { status: "processing" });
-    processVideos(taskId, hooks, bodies);
+    processVideos(taskId, hooks, bodies).catch((err) => {
+      console.error(`[${taskId}] Unhandled error in processVideos:`, err);
+      saveStatus(taskId, { status: "error", message: err.message });
+    });
 
     res.status(202).json({ message: "Upload received", taskId });
   }
@@ -126,61 +129,60 @@ app.get("/status/:taskId", (req, res) => {
 app.use("/results", express.static(resultsDir));
 
 async function processVideos(taskId, hooks, bodies) {
+  console.log(`[${taskId}] Starting video processing...`);
   const taskDir = path.join(resultsDir, taskId);
   await fs.ensureDir(taskDir);
 
   let successCount = 0;
-  const limit = pLimit(1); // Limit to 1 concurrent task
-  const jobs = [];
-
-  for (const hook of hooks) {
-    for (const body of bodies) {
-      const name = `comb_${path.parse(hook.originalname).name}_${
-        path.parse(body.originalname).name
-      }.mp4`;
-      const outputPath = path.join(taskDir, name);
-
-      const job = limit(async () => {
-        try {
-          console.log(
-            `🎬 Starting: ${hook.originalname} + ${body.originalname}`
-          );
-          await combineVideos(hook.path, body.path, outputPath);
-          console.log(`✅ Finished: ${name}`);
-          successCount++;
-        } catch (err) {
-          console.error("❌ Error combining videos:", err);
-          saveStatus(taskId, { status: "error", message: err.toString() });
-        }
-      });
-
-      jobs.push(job);
-    }
-  }
 
   try {
-    await Promise.all(jobs);
+    for (const hook of hooks) {
+      for (const body of bodies) {
+        const name = `comb_${path.parse(hook.originalname).name}_${
+          path.parse(body.originalname).name
+        }.mp4`;
+        const outputPath = path.join(taskDir, name);
+
+        console.log(`[${taskId}] Processing combination: ${name}`);
+        try {
+          await combineVideos(hook.path, body.path, outputPath);
+          successCount++;
+          console.log(`[${taskId}] Finished combination: ${name}`);
+        } catch (err) {
+          console.error(`[${taskId}] Error combining videos ${name}:`, err);
+        }
+      }
+    }
+
+    console.log(
+      `[${taskId}] All combinations processed. Creating report and zip...`
+    );
 
     const report = `Task: ${taskId}
-Date: ${new Date().toLocaleString()}
+Data: ${new Date().toLocaleString()}
 Combinations: ${hooks.length * bodies.length}
 Successes: ${successCount}
 Failures: ${hooks.length * bodies.length - successCount}`;
+
     fs.writeFileSync(path.join(taskDir, "report.txt"), report);
+    console.log(`[${taskId}] Report created.`);
 
     const zipPath = path.join(resultsDir, `${taskId}.zip`);
     await zipDirectory(taskDir, zipPath);
+    console.log(`[${taskId}] Zip file created at ${zipPath}`);
 
-    await saveStatus(taskId, {
+    saveStatus(taskId, {
       status: "done",
       downloadUrl: `/results/${taskId}.zip`,
       success: successCount,
       total: hooks.length * bodies.length,
     });
+    console.log(`[${taskId}] Status updated to done.`);
   } catch (err) {
-    console.log("❌ PROCESSING ERROR:", err.message);
-    await saveStatus(taskId, { status: "error", message: err.message });
+    console.error(`[${taskId}] Processing error:`, err);
+    saveStatus(taskId, { status: "error", message: err.message });
   } finally {
+    console.log(`[${taskId}] Cleaning up uploaded files...`);
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
   }
 }

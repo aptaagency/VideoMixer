@@ -11,7 +11,6 @@ const port = process.env.PORT || 3000;
 
 const uploadsDir = "/tmp/uploads";
 const resultsDir = "/tmp/results";
-const statusMap = {}; // taskId => { status, downloadUrl, etc }
 
 fs.ensureDirSync(uploadsDir);
 fs.ensureDirSync(resultsDir);
@@ -45,7 +44,6 @@ pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v1];\
 [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[a1];\
 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \
 -map "[outv]" -map "[outa]" -c:v libx264 -preset fast -c:a aac -b:a 128k -y "${outputPath}"`;
-
   return runCommand(ffmpegCmd);
 }
 
@@ -57,6 +55,17 @@ async function zipDirectory(source, outPath) {
     stream.on("close", resolve);
     archive.finalize();
   });
+}
+
+function saveStatus(taskId, data) {
+  const statusPath = path.join(resultsDir, taskId, "status.json");
+  fs.writeJsonSync(statusPath, data);
+}
+
+function getStatus(taskId) {
+  const statusPath = path.join(resultsDir, taskId, "status.json");
+  if (!fs.existsSync(statusPath)) return null;
+  return fs.readJsonSync(statusPath);
 }
 
 app.post(
@@ -76,22 +85,18 @@ app.post(
     }
 
     const taskId = uuidv4();
-    statusMap[taskId] = { status: "processing" };
-
+    saveStatus(taskId, { status: "processing" });
     processVideos(taskId, hooks, bodies);
-
     res.status(202).json({ message: "Upload recebido", taskId });
   }
 );
 
 app.get("/status/:taskId", (req, res) => {
   const { taskId } = req.params;
-  const taskStatus = statusMap[taskId];
-
+  const taskStatus = getStatus(taskId);
   if (!taskStatus) {
     return res.status(404).json({ error: "taskId não encontrado" });
   }
-
   res.json(taskStatus);
 });
 
@@ -110,7 +115,6 @@ async function processVideos(taskId, hooks, bodies) {
         path.parse(body.originalname).name
       }.mp4`;
       const outputPath = path.join(taskDir, name);
-
       const job = combineVideos(hook.path, body.path, outputPath)
         .then(() => successCount++)
         .catch((err) => console.error("Erro ao combinar vídeos:", err));
@@ -126,20 +130,19 @@ Data: ${new Date().toLocaleString()}
 Combinations: ${hooks.length * bodies.length}
 Sucessos: ${successCount}
 Falhas: ${hooks.length * bodies.length - successCount}`;
-
     fs.writeFileSync(path.join(taskDir, "report.txt"), report);
 
     const zipPath = path.join(resultsDir, `${taskId}.zip`);
     await zipDirectory(taskDir, zipPath);
 
-    statusMap[taskId] = {
+    saveStatus(taskId, {
       status: "done",
       downloadUrl: `/results/${taskId}.zip`,
       success: successCount,
       total: hooks.length * bodies.length,
-    };
+    });
   } catch (err) {
-    statusMap[taskId] = { status: "error", message: err.message };
+    saveStatus(taskId, { status: "error", message: err.message });
   } finally {
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
   }
@@ -148,7 +151,6 @@ Falhas: ${hooks.length * bodies.length - successCount}`;
 const http = require("http");
 const server = http.createServer(app);
 server.setTimeout(10 * 60 * 1000);
-
 server.listen(port, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${port}`);
 });

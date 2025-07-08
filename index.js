@@ -30,8 +30,10 @@ function runCommand(cmd) {
       cmd,
       { timeout: 5 * 60 * 1000 },
       (error, stdout, stderr) => {
+        console.log("🔧 STDOUT:\n", stdout);
+        console.error("🔧 STDERR:\n", stderr);
         if (error) {
-          console.error("⚠️ FFmpeg error:", stderr || stdout || error.message);
+          console.error("❌ Exec error:", error.message);
           return reject(stderr || stdout || error.message);
         }
         resolve(stdout);
@@ -39,13 +41,13 @@ function runCommand(cmd) {
     );
 
     child.on("error", (err) => {
-      console.error("❌ Exec error:", err);
+      console.error("❌ Child process error:", err);
       reject(err);
     });
   });
 }
 
-async function combineVideos(hookPath, bodyPath, outputPath) {
+async function combineVideos(hookPath, bodyPath, outputPath, taskId) {
   const ffmpegCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats -fflags +genpts \
 -i "${hookPath}" -i "${bodyPath}" \
 -filter_complex "[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,\
@@ -57,10 +59,17 @@ pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v1];\
 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \
 -map "[outv]" -map "[outa]" -c:v libx264 -preset fast -c:a aac -b:a 128k -y "${outputPath}"`;
 
-  console.log("🎬 Executing FFmpeg command:");
-  console.log(ffmpegCmd);
+  console.log(`[${taskId}] 🎬 Executing FFmpeg command:\n${ffmpegCmd}`);
 
-  return runCommand(ffmpegCmd);
+  await runCommand(ffmpegCmd);
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error(
+      `[${taskId}] ❌ Output file was not created: ${outputPath}`
+    );
+  }
+
+  console.log(`[${taskId}] ✅ Output file created: ${outputPath}`);
 }
 
 async function zipDirectory(source, outPath) {
@@ -77,7 +86,7 @@ function saveStatus(taskId, data) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
   fs.ensureDirSync(path.dirname(statusPath));
   fs.writeJsonSync(statusPath, data);
-  console.log(`✅ Status saved at ${statusPath}:`, data);
+  console.log(`[${taskId}] 💾 Status saved:`, data);
 }
 
 function getStatus(taskId) {
@@ -87,7 +96,7 @@ function getStatus(taskId) {
   try {
     return fs.readJsonSync(statusPath);
   } catch (err) {
-    console.log("❌ Failed to read status.json:", err.message);
+    console.log(`[${taskId}] ❌ Failed to read status.json:`, err.message);
     return null;
   }
 }
@@ -112,9 +121,8 @@ app.post(
     console.log("🆕 New task:", taskId);
     saveStatus(taskId, { status: "processing" });
 
-    // Chama o processamento e captura qualquer erro inesperado
     processVideos(taskId, hooks, bodies).catch((err) => {
-      console.error(`[${taskId}] Unhandled error:`, err);
+      console.error(`[${taskId}] ❌ Unhandled processing error:`, err);
       saveStatus(taskId, { status: "error", message: err.message });
     });
 
@@ -131,7 +139,7 @@ app.get("/status/:taskId", (req, res) => {
 app.use("/results", express.static(resultsDir));
 
 async function processVideos(taskId, hooks, bodies) {
-  console.log(`[${taskId}] Starting video processing...`);
+  console.log(`[${taskId}] 🚀 Starting video processing...`);
   const taskDir = path.join(resultsDir, taskId);
   await fs.ensureDir(taskDir);
 
@@ -145,13 +153,11 @@ async function processVideos(taskId, hooks, bodies) {
         }.mp4`;
         const outputPath = path.join(taskDir, name);
 
-        console.log(`[${taskId}] Processing combination: ${name}`);
         try {
-          await combineVideos(hook.path, body.path, outputPath);
-          console.log(`[${taskId}] ✅ Finished: ${name}`);
+          await combineVideos(hook.path, body.path, outputPath, taskId);
           successCount++;
         } catch (err) {
-          console.error(`[${taskId}] ❌ Error combining ${name}:`, err);
+          console.error(`[${taskId}] ❌ Error combining ${name}:`, err.message);
         }
       }
     }
@@ -162,7 +168,7 @@ Combinations: ${hooks.length * bodies.length}
 Successes: ${successCount}
 Failures: ${hooks.length * bodies.length - successCount}`;
     fs.writeFileSync(path.join(taskDir, "report.txt"), report);
-    console.log(`[${taskId}] 📝 Report created.`);
+    console.log(`[${taskId}] 📝 Report written.`);
 
     const zipPath = path.join(resultsDir, `${taskId}.zip`);
     await zipDirectory(taskDir, zipPath);
@@ -174,12 +180,11 @@ Failures: ${hooks.length * bodies.length - successCount}`;
       success: successCount,
       total: hooks.length * bodies.length,
     });
-    console.log(`[${taskId}] ✅ Status updated to done.`);
   } catch (err) {
-    console.error(`[${taskId}] ❌ Fatal error:`, err);
+    console.error(`[${taskId}] ❌ Fatal error during processing:`, err.message);
     saveStatus(taskId, { status: "error", message: err.message });
   } finally {
-    console.log(`[${taskId}] 🧹 Cleaning up temp files.`);
+    console.log(`[${taskId}] 🧹 Cleaning up temp files...`);
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
   }
 }

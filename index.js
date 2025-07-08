@@ -59,13 +59,29 @@ async function zipDirectory(source, outPath) {
 
 function saveStatus(taskId, data) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
+  fs.ensureDirSync(path.dirname(statusPath));
   fs.writeJsonSync(statusPath, data);
+  console.log(`✅ Status salvo em ${statusPath}:`, data);
 }
 
 function getStatus(taskId) {
   const statusPath = path.join(resultsDir, taskId, "status.json");
-  if (!fs.existsSync(statusPath)) return null;
-  return fs.readJsonSync(statusPath);
+  console.log("📥 Verificando status para:", taskId);
+  console.log("📄 Caminho:", statusPath);
+
+  if (!fs.existsSync(statusPath)) {
+    console.log("❌ status.json NÃO encontrado!");
+    return null;
+  }
+
+  try {
+    const data = fs.readJsonSync(statusPath);
+    console.log("✅ Status encontrado:", data);
+    return data;
+  } catch (err) {
+    console.log("❌ Erro ao ler status.json:", err.message);
+    return null;
+  }
 }
 
 app.post(
@@ -85,8 +101,11 @@ app.post(
     }
 
     const taskId = uuidv4();
+    console.log("🆕 Nova task:", taskId);
+
     saveStatus(taskId, { status: "processing" });
     processVideos(taskId, hooks, bodies);
+
     res.status(202).json({ message: "Upload recebido", taskId });
   }
 );
@@ -94,9 +113,11 @@ app.post(
 app.get("/status/:taskId", (req, res) => {
   const { taskId } = req.params;
   const taskStatus = getStatus(taskId);
+
   if (!taskStatus) {
     return res.status(404).json({ error: "taskId não encontrado" });
   }
+
   res.json(taskStatus);
 });
 
@@ -117,7 +138,7 @@ async function processVideos(taskId, hooks, bodies) {
       const outputPath = path.join(taskDir, name);
       const job = combineVideos(hook.path, body.path, outputPath)
         .then(() => successCount++)
-        .catch((err) => console.error("Erro ao combinar vídeos:", err));
+        .catch((err) => console.error("❌ Erro ao combinar vídeos:", err));
       jobs.push(job);
     }
   }
@@ -142,6 +163,7 @@ Falhas: ${hooks.length * bodies.length - successCount}`;
       total: hooks.length * bodies.length,
     });
   } catch (err) {
+    console.log("❌ ERRO NO PROCESSAMENTO:", err.message);
     saveStatus(taskId, { status: "error", message: err.message });
   } finally {
     [...hooks, ...bodies].forEach((f) => fs.remove(f.path));
@@ -152,5 +174,5 @@ const http = require("http");
 const server = http.createServer(app);
 server.setTimeout(10 * 60 * 1000);
 server.listen(port, "0.0.0.0", () => {
-  console.log(`✅ Server running on port ${port}`);
+  console.log(`🚀 Server running on http://0.0.0.0:${port}`);
 });

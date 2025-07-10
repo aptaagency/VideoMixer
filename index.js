@@ -1,5 +1,6 @@
 const express = require("express");
 const multer = require("multer");
+const cors = require("cors");
 const fs = require("fs-extra");
 const path = require("path");
 const { exec } = require("child_process");
@@ -7,6 +8,15 @@ const archiver = require("archiver");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
+
+app.use(
+  cors({
+    origin: "https://v8n26s.csb.app", // seu frontend no CodeSandbox
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
+
 const port = process.env.PORT || 3000;
 
 const uploadsDir = "/tmp/uploads";

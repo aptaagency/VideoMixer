@@ -6,12 +6,13 @@ const path = require("path");
 const { exec } = require("child_process");
 const archiver = require("archiver");
 const { v4: uuidv4 } = require("uuid");
+const pLimit = require("p-limit");
 
 const app = express();
 
 app.use(
   cors({
-    origin: "https://v8n26s.csb.app", // seu frontend no CodeSandbox
+    origin: "https://v8n26s.csb.app",
     methods: ["GET", "POST"],
     allowedHeaders: ["Content-Type"],
   })
@@ -38,7 +39,7 @@ function runCommand(cmd) {
   return new Promise((resolve, reject) => {
     const child = exec(
       cmd,
-      { timeout: 5 * 60 * 1000 },
+      { timeout: 10 * 60 * 1000 },
       (error, stdout, stderr) => {
         console.log("🔧 STDOUT:\n", stdout);
         console.error("🔧 STDERR:\n", stderr);
@@ -58,16 +59,17 @@ function runCommand(cmd) {
 }
 
 async function combineVideos(hookPath, bodyPath, outputPath) {
-  const ffmpegCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats -fflags +genpts \
+  const ffmpegCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats \
 -i "${hookPath}" -i "${bodyPath}" \
--filter_complex "[0:v]scale=1280:720:force_original_aspect_ratio=decrease,\
-pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v0];\
+-filter_complex "\
+[0:v]scale=1280:720:force_original_aspect_ratio=decrease,\
+pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[v0];\
 [1:v]scale=1280:720:force_original_aspect_ratio=decrease,\
-pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v1];\
-[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[a0];\
-[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[a1];\
+pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[v1];\
+[0:a]aresample=async=1[a0];\
+[1:a]aresample=async=1[a1];\
 [v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \
--map "[outv]" -map "[outa]" -c:v libx264 -preset ultrafast -b:v 1000k -c:a aac -b:a 96k -y "${outputPath}"`;
+-map "[outv]" -map "[outa]" -c:v libx264 -crf 23 -preset slow -c:a aac -b:a 128k -movflags +faststart -y "${outputPath}"`;
 
   return runCommand(ffmpegCmd);
 }
@@ -143,23 +145,29 @@ async function processVideos(taskId, hooks, bodies) {
   await fs.ensureDir(taskDir);
 
   let successCount = 0;
+  const limit = pLimit(2); // máximo 2 vídeos processando ao mesmo tempo
+  const tasks = [];
 
   for (const hook of hooks) {
     for (const body of bodies) {
-      const name = `comb_${path.parse(hook.originalname).name}_${
-        path.parse(body.originalname).name
-      }.mp4`;
+      const name = `comb_${uuidv4()}.mp4`;
       const outputPath = path.join(taskDir, name);
 
-      try {
-        console.log(`[${taskId}] 🎬 Executing FFmpeg for ${name}`);
-        await combineVideos(hook.path, body.path, outputPath);
-        successCount++;
-      } catch (err) {
-        console.error(`[${taskId}] ❌ Error combining ${name}:`, err);
-      }
+      tasks.push(
+        limit(async () => {
+          try {
+            console.log(`[${taskId}] 🎬 Executando FFmpeg para ${name}`);
+            await combineVideos(hook.path, body.path, outputPath);
+            successCount++;
+          } catch (err) {
+            console.error(`[${taskId}] ❌ Erro combinando ${name}:`, err);
+          }
+        })
+      );
     }
   }
+
+  await Promise.all(tasks);
 
   try {
     const report = `Task: ${taskId}

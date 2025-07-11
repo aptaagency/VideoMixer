@@ -59,19 +59,36 @@ function runCommand(cmd) {
 }
 
 async function combineVideos(hookPath, bodyPath, outputPath) {
-  const ffmpegCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats \
--i "${hookPath}" -i "${bodyPath}" \
--filter_complex "\
-[0:v]scale=1280:720:force_original_aspect_ratio=decrease,\
-pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[v0];\
-[1:v]scale=1280:720:force_original_aspect_ratio=decrease,\
-pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p[v1];\
-[0:a]aresample=async=1[a0];\
-[1:a]aresample=async=1[a1];\
-[v0][a0][v1][a1]concat=n=2:v=1:a=1[outv][outa]" \
--map "[outv]" -map "[outa]" -c:v libx264 -crf 23 -preset slow -c:a aac -b:a 128k -movflags +faststart -y "${outputPath}"`;
+  const tempDir = path.join("/tmp", "intermediate", uuidv4());
+  await fs.ensureDir(tempDir);
 
-  return runCommand(ffmpegCmd);
+  const hookTs = path.join(tempDir, "hook.ts");
+  const bodyTs = path.join(tempDir, "body.ts");
+  const inputsFile = path.join(tempDir, "inputs.txt");
+
+  const normalizeForFFmpeg = (p) => p.replace(/\\/g, "/");
+
+  const transcode = async (inputPath, outputTs) => {
+    const cmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats -i "${inputPath}" \
+-vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black" \
+-c:v libx264 -preset veryslow -crf 23 -c:a aac -b:a 128k -f mpegts -y "${outputTs}"`;
+    return runCommand(cmd);
+  };
+
+  await transcode(hookPath, hookTs);
+  await transcode(bodyPath, bodyTs);
+
+  await fs.writeFile(
+    inputsFile,
+    `file '${normalizeForFFmpeg(hookTs)}'\nfile '${normalizeForFFmpeg(
+      bodyTs
+    )}'\n`
+  );
+
+  const concatCmd = `ffmpeg -nostdin -hide_banner -loglevel error -stats -f concat -safe 0 -i "${inputsFile}" -c copy -movflags +faststart -y "${outputPath}"`;
+  await runCommand(concatCmd);
+
+  await fs.remove(tempDir); // limpa os arquivos temporários
 }
 
 async function zipDirectory(source, outPath) {
